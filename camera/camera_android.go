@@ -5,6 +5,7 @@ package camera
 
 /*
 #include <android/log.h>
+#include <pthread.h>
 
 #include <media/NdkImageReader.h>
 
@@ -30,6 +31,11 @@ ACameraCaptureSession *cameraCaptureSession;
 ACaptureRequest *captureRequest;
 ACaptureSessionOutput *captureSessionOutput;
 ACaptureSessionOutputContainer *captureSessionOutputContainer;
+
+// Synchronization primitives
+pthread_mutex_t imageMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t imageCond = PTHREAD_COND_INITIALIZER;
+int imageReady = 0;
 
 void device_on_disconnected(void *context, ACameraDevice *device) {
     LOGI("camera %s is disconnected.\n", ACameraDevice_getId(device));
@@ -67,10 +73,23 @@ ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks = {
 void image_callback(void *context, AImageReader *reader) {
     LOGD("image_callback");
 
+    pthread_mutex_lock(&imageMutex);
+    
+    // Delete previous image if exists
+    if(image != NULL) {
+        AImage_delete(image);
+        image = NULL;
+    }
+
     media_status_t status = AImageReader_acquireLatestImage(reader, &image);
     if(status != AMEDIA_OK) {
 		LOGE("failed to acquire next image (reason: %d).\n", status);
+    } else {
+        imageReady = 1;
+        pthread_cond_signal(&imageCond);
     }
+    
+    pthread_mutex_unlock(&imageMutex);
 }
 
 AImageReader_ImageListener imageListener = {
@@ -94,10 +113,16 @@ int openCamera(int index, int width, int height) {
 
     if(cameraIdList->numCameras < 1) {
 		LOGE("no camera device detected.\n");
+		ACameraManager_deleteCameraIdList(cameraIdList);
+		ACameraManager_delete(cameraManager);
+		return ACAMERA_ERROR_CAMERA_DISCONNECTED;
     }
 
     if(cameraIdList->numCameras < index+1) {
 		LOGE("no camera at index %d.\n", index);
+		ACameraManager_deleteCameraIdList(cameraIdList);
+		ACameraManager_delete(cameraManager);
+		return ACAMERA_ERROR_INVALID_PARAMETER;
     }
 
     selectedCameraId = cameraIdList->cameraIds[index];
@@ -149,16 +174,39 @@ int openCamera(int index, int width, int height) {
     }
 
     ACameraManager_deleteCameraIdList(cameraIdList);
-    ACameraManager_delete(cameraManager);
+    // Don't delete cameraManager here - it's needed for camera operations
+    // ACameraManager_delete(cameraManager);
 
     return ACAMERA_OK;
 }
 
 int captureCamera() {
+    pthread_mutex_lock(&imageMutex);
+    imageReady = 0;
+    pthread_mutex_unlock(&imageMutex);
+
     camera_status_t status = ACameraCaptureSession_capture(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
 		LOGE("failed to capture image (reason: %d).\n", status);
+        return status;
     }
+
+    // Wait for image to be ready (with timeout)
+    pthread_mutex_lock(&imageMutex);
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 5; // 5 second timeout
+    
+    while(!imageReady && status == ACAMERA_OK) {
+        int ret = pthread_cond_timedwait(&imageCond, &imageMutex, &timeout);
+        if(ret == ETIMEDOUT) {
+            LOGE("timeout waiting for image\n");
+            status = ACAMERA_ERROR_CAMERA_DISCONNECTED;
+            break;
+        }
+    }
+    
+    pthread_mutex_unlock(&imageMutex);
 
     return status;
 }
@@ -216,7 +264,7 @@ int captureCamera();
 int closeCamera();
 
 #cgo android CFLAGS: -D__ANDROID_API__=24
-#cgo android LDFLAGS: -lcamera2ndk -lmediandk -llog -landroid
+#cgo android LDFLAGS: -lcamera2ndk -lmediandk -llog -landroid -lpthread
 */
 import "C"
 
@@ -254,13 +302,11 @@ func (c *Camera) Read() (img image.Image, err error) {
 	ret := C.captureCamera()
 	if int(ret) != 0 {
 		err = fmt.Errorf("camera: can not grab frame: error %d", int(ret))
-
 		return
 	}
 
 	if C.image == nil {
 		err = fmt.Errorf("camera: can not retrieve frame")
-
 		return
 	}
 
@@ -272,6 +318,11 @@ func (c *Camera) Read() (img image.Image, err error) {
 	C.AImage_getPlaneData(C.image, 0, &yPtr, &yLen)
 	C.AImage_getPlaneData(C.image, 1, &cbPtr, &cbLen)
 	C.AImage_getPlaneData(C.image, 2, &crPtr, &crLen)
+
+	if yLen <= 0 || cbLen <= 0 || crLen <= 0 {
+		err = fmt.Errorf("camera: invalid image data lengths: Y=%d, Cb=%d, Cr=%d", int(yLen), int(cbLen), int(crLen))
+		return
+	}
 
 	c.img.YStride = int(yStride)
 	c.img.CStride = int(yStride) / 2
