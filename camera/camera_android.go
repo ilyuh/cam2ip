@@ -76,7 +76,7 @@ void image_callback(void *context, AImageReader *reader) {
     LOGD("image_callback called");
 
     pthread_mutex_lock(&imageMutex);
-    
+
     // Delete previous image if exists
     if(image != NULL) {
         AImage_delete(image);
@@ -91,7 +91,7 @@ void image_callback(void *context, AImageReader *reader) {
         imageReady = 1;
         pthread_cond_signal(&imageCond);
     }
-    
+
     pthread_mutex_unlock(&imageMutex);
 }
 
@@ -200,7 +200,7 @@ int captureCamera() {
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
     timeout.tv_sec += 2; // 2 second timeout
-    
+
     while(!imageReady && status == ACAMERA_OK) {
         int ret = pthread_cond_timedwait(&imageCond, &imageMutex, &timeout);
         if(ret == ETIMEDOUT) {
@@ -209,7 +209,7 @@ int captureCamera() {
             break;
         }
     }
-    
+
     pthread_mutex_unlock(&imageMutex);
 
     return status;
