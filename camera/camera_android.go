@@ -73,7 +73,7 @@ ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks = {
 };
 
 void image_callback(void *context, AImageReader *reader) {
-    LOGD("image_callback");
+    LOGD("image_callback called");
 
     pthread_mutex_lock(&imageMutex);
     
@@ -87,6 +87,7 @@ void image_callback(void *context, AImageReader *reader) {
     if(status != AMEDIA_OK) {
 		LOGE("failed to acquire next image (reason: %d).\n", status);
     } else {
+        LOGD("image acquired successfully");
         imageReady = 1;
         pthread_cond_signal(&imageCond);
     }
@@ -187,9 +188,10 @@ int captureCamera() {
     imageReady = 0;
     pthread_mutex_unlock(&imageMutex);
 
+    // Use single capture request instead of repeating
     camera_status_t status = ACameraCaptureSession_capture(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
-		LOGE("failed to capture image (reason: %d).\n", status);
+        LOGE("failed to capture image (reason: %d).\n", status);
         return status;
     }
 
@@ -197,7 +199,7 @@ int captureCamera() {
     pthread_mutex_lock(&imageMutex);
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 5; // 5 second timeout
+    timeout.tv_sec += 2; // 2 second timeout
     
     while(!imageReady && status == ACAMERA_OK) {
         int ret = pthread_cond_timedwait(&imageCond, &imageMutex, &timeout);
