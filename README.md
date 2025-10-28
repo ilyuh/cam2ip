@@ -71,6 +71,35 @@ Usage: cam2ip [<flags>]
 
 ### Handlers
 
-  * `/html`: HTML handler, frames are pushed to canvas over websocket
-  * `/jpeg`: Static JPEG handler
-  * `/mjpeg`: Motion JPEG, supported natively in major web browsers
+  * `/`: Authentication page (username: admin, password: admin)
+  * `/dashboard`: Main dashboard with links to all available services (requires authentication)
+  * `/logout`: Logout and clear session
+  * `/html`: HTML handler, frames are pushed to canvas over websocket (requires authentication)
+  * `/jpeg`: Static JPEG handler (requires authentication)
+  * `/mjpeg`: Motion JPEG, supported natively in major web browsers (requires authentication)
+
+### Database and Authentication
+
+The application now uses SQLite for user management and authentication logging:
+
+- **Database**: `data/cam2ip.db` - SQLite database with users and auth logs
+- **Logs**: `logs/cam2ip-YYYY-MM-DD.log` - Daily authentication and access logs
+- **Default user**: admin/admin (created automatically on first run)
+
+### User Management
+
+Use the user management utility to create additional users:
+
+```bash
+go run ./cmd/user-manager
+```
+
+Or manually manage users with SQLite:
+
+```bash
+# View all users
+sqlite3 data/cam2ip.db "SELECT id, username, email, is_active, created_at FROM users;"
+
+# View authentication logs
+sqlite3 data/cam2ip.db "SELECT username, ip_address, success, created_at FROM auth_logs ORDER BY created_at DESC LIMIT 10;"
+```

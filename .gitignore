@@ -1,0 +1,35 @@
+# Binaries
+cam2ip
+cam2ip.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build and cache directories
+bin/
+build/
+dist/
+*.out
+
+# Logs
+logs/
+*.log
+cam2ip-*.log
+
+# Local databases and data artifacts
+data/*.db
+*.db
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Coverage and test artifacts
+coverage/
+*.coverprofile
+*.cov

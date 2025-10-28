@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/abbot/go-http-auth"
-
 	"github.com/gen2brain/cam2ip/handlers"
 )
 
@@ -47,22 +45,37 @@ func NewServer() *Server {
 
 // ListenAndServe listens on the TCP address and serves requests.
 func (s *Server) ListenAndServe() error {
-	var basic *auth.BasicAuth
-	if s.Htpasswd != "" {
-		realm := fmt.Sprintf("%s/%s", s.Name, s.Version)
-		basic = auth.NewBasicAuthenticator(realm, auth.HtpasswdFileProvider(s.Htpasswd))
+	// Инициализируем базу данных
+	if err := handlers.InitDatabase(); err != nil {
+		return fmt.Errorf("failed to initialize database: %v", err)
+	}
+	defer handlers.GetDatabase().Close()
+
+	// Инициализируем логгер
+	if err := handlers.InitLogger(); err != nil {
+		return fmt.Errorf("failed to initialize logger: %v", err)
 	}
 
-	http.Handle("/html", newAuthHandler(handlers.NewHTML(s.Width, s.Height, s.NoWebGL), basic))
-	http.Handle("/jpeg", newAuthHandler(handlers.NewJPEG(s.Reader, s.Quality), basic))
-	http.Handle("/mjpeg", newAuthHandler(handlers.NewMJPEG(s.Reader, s.Delay, s.Quality), basic))
-	http.Handle("/socket", newAuthHandler(handlers.NewSocket(s.Reader, s.Delay, s.Quality), basic))
+	// Note: Basic auth is disabled in favor of custom session-based authentication
+
+	// Публичные маршруты (не требуют авторизации)
+	http.Handle("/", handlers.NewAuth()) // Страница авторизации теперь на корневом маршруте
+
+	// Отладочные маршруты (только для разработки)
+	http.HandleFunc("/debug/headers", handlers.DebugHeaders)
+	http.HandleFunc("/debug/ip", handlers.DebugIP)
+
+	// Защищенные маршруты (требуют авторизации)
+	http.Handle("/dashboard", handlers.AuthMiddleware(handlers.NewDashboard()))
+	http.Handle("/logout", handlers.NewLogout())
+	http.Handle("/html", handlers.AuthMiddleware(handlers.NewHTML(s.Width, s.Height, s.NoWebGL)))
+	http.Handle("/jpeg", handlers.AuthMiddleware(handlers.NewJPEG(s.Reader, s.Quality)))
+	http.Handle("/mjpeg", handlers.AuthMiddleware(handlers.NewMJPEG(s.Reader, s.Delay, s.Quality)))
+	http.Handle("/socket", handlers.AuthMiddleware(handlers.NewSocket(s.Reader, s.Delay, s.Quality)))
 
 	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-
-	http.Handle("/", newAuthHandler(handlers.NewIndex(), basic))
 
 	srv := &http.Server{
 		ReadTimeout:  5 * time.Second,
@@ -75,20 +88,4 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	return srv.Serve(listener)
-}
-
-// newAuthHandler wraps handler and checks auth.
-func newAuthHandler(handler http.Handler, authenticator *auth.BasicAuth) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if authenticator != nil {
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=\"%s\"", authenticator.Realm))
-			if authenticator.CheckAuth(r) == "" {
-				http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
-
-				return
-			}
-		}
-
-		handler.ServeHTTP(w, r)
-	})
 }
