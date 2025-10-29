@@ -9,11 +9,17 @@ package camera
 #include <time.h>
 #include <errno.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
 #include <media/NdkImageReader.h>
-
 #include <camera/NdkCameraDevice.h>
 #include <camera/NdkCameraManager.h>
+
+// Forward declarations
+void* memcpy(void* dest, const void* src, size_t n);
+void free(void* ptr);
 
 #define TAG "camera"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -113,6 +119,12 @@ AImageReader_ImageListener imageListener = {
 	.onImageAvailable = image_callback,
 };
 
+// Function declarations
+int openCamera(int index, int width, int height);
+int captureCamera(void);
+int closeCamera(void);
+
+// Function implementations
 int openCamera(int index, int width, int height) {
     ACameraIdList *cameraIdList;
     const char *selectedCameraId;
@@ -293,7 +305,7 @@ int openCamera(int index, int width, int height) {
     return ACAMERA_OK;
 }
 
-int captureCamera() {
+int captureCamera(void) {
     // Just wait for the next frame produced by the repeating request
     pthread_mutex_lock(&imageMutex);
     imageReady = 0;
@@ -328,7 +340,7 @@ int captureCamera() {
     return status;
 }
 
-int closeCamera() {
+int closeCamera(void) {
     camera_status_t status = ACAMERA_OK;
 
     if(captureRequest != NULL) {
@@ -375,10 +387,6 @@ int closeCamera() {
     LOGI("camera closed.\n");
     return ACAMERA_OK;
 }
-
-int openCamera(int index, int width, int height);
-int captureCamera();
-int closeCamera();
 
 #cgo android CFLAGS: -D__ANDROID_API__=24
 #cgo android LDFLAGS: -lcamera2ndk -lmediandk -llog -landroid -lpthread
