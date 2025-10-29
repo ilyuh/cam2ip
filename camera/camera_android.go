@@ -74,20 +74,23 @@ ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks = {
 };
 
 void image_callback(void *context, AImageReader *reader) {
-    LOGD("image_callback called");
+    LOGI("image_callback called");
 
     pthread_mutex_lock(&imageMutex);
 
     // Delete previous image if exists
     if(image != NULL) {
+        LOGI("Deleting previous image");
         AImage_delete(image);
         image = NULL;
     }
 
+    LOGI("Attempting to acquire new image");
     media_status_t status = AImageReader_acquireLatestImage(reader, &image);
     if(status != AMEDIA_OK) {
         LOGE("failed to acquire next image (reason: %d).\n", status);
         // Try to acquire latest image once more
+        LOGI("Retrying image acquisition");
         status = AImageReader_acquireLatestImage(reader, &image);
         if(status != AMEDIA_OK) {
             LOGE("failed to acquire next image on retry (reason: %d).\n", status);
@@ -95,9 +98,14 @@ void image_callback(void *context, AImageReader *reader) {
     }
 
     if(status == AMEDIA_OK && image != NULL) {
-        LOGD("image acquired successfully");
+        int32_t width, height;
+        AImage_getWidth(image, &width);
+        AImage_getHeight(image, &height);
+        LOGI("Image acquired successfully: %dx%d", width, height);
         imageReady = 1;
         pthread_cond_signal(&imageCond);
+    } else {
+        LOGE("Failed to acquire valid image");
     }
 
     pthread_mutex_unlock(&imageMutex);
@@ -145,8 +153,8 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use STILL_CAPTURE template for better quality
-    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_STILL_CAPTURE, &captureRequest);
+    // Use PREVIEW template for continuous streaming
+    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
     if(status != ACAMERA_OK) {
 		LOGE("failed to create snapshot capture request (id: %s)\n", selectedCameraId);
 		return status;
@@ -158,8 +166,10 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use JPEG format directly and increase buffer size
-    media_status_t mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_JPEG, 8, &imageReader);
+    // Create image reader with YUV format for better streaming performance
+    media_status_t mstatus;
+    LOGI("Creating image reader: %dx%d", width, height);
+    mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &imageReader);
     if(mstatus != AMEDIA_OK) {
         LOGE("failed to create image reader (reason: %d).\n", mstatus);
         return mstatus;
@@ -319,10 +329,8 @@ int closeCamera();
 import "C"
 
 import (
-	"bytes"
 	"fmt"
 	"image"
-	"image/jpeg"
 	"time"
 	"unsafe"
 )
@@ -371,19 +379,30 @@ func (c *Camera) Read() (img image.Image, err error) {
 		return
 	}
 
-	var dataPtr *C.uint8_t
-	var dataLen C.int
+	var yStride C.int
+	var yLen, cbLen, crLen C.int
+	var yPtr, cbPtr, crPtr *C.uint8_t
 
-	// Get JPEG data directly
-	C.AImage_getPlaneData(C.image, 0, &dataPtr, &dataLen)
-	if int(dataLen) <= 0 {
-		err = fmt.Errorf("camera: invalid image data length: %d", int(dataLen))
+	// Get YUV plane data
+	C.AImage_getPlaneRowStride(C.image, 0, &yStride)
+	C.AImage_getPlaneData(C.image, 0, &yPtr, &yLen)
+	C.AImage_getPlaneData(C.image, 1, &cbPtr, &cbLen)
+	C.AImage_getPlaneData(C.image, 2, &crPtr, &crLen)
+
+	if yLen <= 0 || cbLen <= 0 || crLen <= 0 {
+		err = fmt.Errorf("camera: invalid plane lengths: Y=%d, Cb=%d, Cr=%d", int(yLen), int(cbLen), int(crLen))
 		return
 	}
 
-	// Convert to Go bytes and decode JPEG
-	jpegData := C.GoBytes(unsafe.Pointer(dataPtr), dataLen)
-	img, err = jpeg.Decode(bytes.NewReader(jpegData))
+	// Create YCbCr image
+	yuvImg := image.NewYCbCr(image.Rect(0, 0, int(c.opts.Width), int(c.opts.Height)), image.YCbCrSubsampleRatio420)
+	yuvImg.Y = C.GoBytes(unsafe.Pointer(yPtr), yLen)
+	yuvImg.Cb = C.GoBytes(unsafe.Pointer(cbPtr), cbLen)
+	yuvImg.Cr = C.GoBytes(unsafe.Pointer(crPtr), crLen)
+	yuvImg.YStride = int(yStride)
+	yuvImg.CStride = int(yStride) / 2
+
+	img = yuvImg
 
 	// Release the image
 	C.AImage_delete(C.image)
