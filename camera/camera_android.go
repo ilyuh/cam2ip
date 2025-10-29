@@ -236,7 +236,6 @@ int openCamera(int index, int width, int height) {
 
     return ACAMERA_OK;
 }
-}
 
 int captureCamera() {
     // Just wait for the next frame produced by the repeating request
