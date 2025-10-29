@@ -8,6 +8,7 @@ package camera
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <media/NdkImageReader.h>
 
@@ -92,7 +93,7 @@ void image_callback(void *context, AImageReader *reader) {
             LOGE("failed to acquire next image on retry (reason: %d).\n", status);
         }
     }
-    
+
     if(status == AMEDIA_OK && image != NULL) {
         LOGD("image acquired successfully");
         imageReady = 1;
@@ -144,8 +145,8 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use PREVIEW template for continuous streaming to ImageReader
-    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
+    // Use STILL_CAPTURE template for better quality
+    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_STILL_CAPTURE, &captureRequest);
     if(status != ACAMERA_OK) {
 		LOGE("failed to create snapshot capture request (id: %s)\n", selectedCameraId);
 		return status;
@@ -163,7 +164,7 @@ int openCamera(int index, int width, int height) {
         LOGE("failed to create image reader (reason: %d).\n", mstatus);
         return mstatus;
     }
-    
+
     // Set JPEG quality
     int32_t jpegQuality = 85;
     ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_JPEG_QUALITY, 1, &jpegQuality);
@@ -180,19 +181,23 @@ int openCamera(int index, int width, int height) {
     ACameraOutputTarget_create(nativeWindow, &cameraOutputTarget);
     ACaptureRequest_addTarget(captureRequest, cameraOutputTarget);
 
-    // Configure basic 3A controls for preview
+    // Configure capture settings
     {
+        // Set JPEG quality
+        int32_t jpegQuality = 85;
+        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_JPEG_QUALITY, 1, &jpegQuality);
+
         // AF mode: CONTINUOUS_PICTURE
-        int32_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
-        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+        uint8_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
 
         // AE mode: ON
-        int32_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
-        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+        uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
 
         // AWB mode: AUTO
-        int32_t awbMode = ACAMERA_CONTROL_AWB_MODE_AUTO;
-        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AWB_MODE, 1, &awbMode);
+        uint8_t awbMode = ACAMERA_CONTROL_AWB_MODE_AUTO;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AWB_MODE, 1, &awbMode);
     }
 
     ACaptureSessionOutput_create(nativeWindow, &captureSessionOutput);
@@ -216,6 +221,17 @@ int openCamera(int index, int width, int height) {
         .onCaptureBufferLost = NULL,
     };
 
+        // Create capture callback structure
+    ACameraCaptureSession_captureCallbacks captureCallbacks;
+    captureCallbacks.context = NULL;
+    captureCallbacks.onCaptureStarted = NULL;
+    captureCallbacks.onCaptureProgressed = NULL;
+    captureCallbacks.onCaptureCompleted = NULL;
+    captureCallbacks.onCaptureFailed = NULL;
+    captureCallbacks.onCaptureSequenceCompleted = NULL;
+    captureCallbacks.onCaptureSequenceAborted = NULL;
+    captureCallbacks.onCaptureBufferLost = NULL;
+
     // Start a repeating request with callbacks
     status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, &captureCallbacks, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
@@ -231,6 +247,7 @@ int openCamera(int index, int width, int height) {
     // ACameraManager_delete(cameraManager);
 
     return ACAMERA_OK;
+}
 }
 
 int captureCamera() {
@@ -315,15 +332,17 @@ int closeCamera();
 import "C"
 
 import (
+	"bytes"
 	"fmt"
 	"image"
+	"image/jpeg"
+	"time"
 	"unsafe"
 )
 
 // Camera represents camera.
 type Camera struct {
 	opts Options
-	img  *image.YCbCr
 }
 
 // New returns new Camera for given camera index.
@@ -331,12 +350,9 @@ func New(opts Options) (camera *Camera, err error) {
 	camera = &Camera{}
 	camera.opts = opts
 
-	camera.img = image.NewYCbCr(image.Rect(0, 0, int(opts.Width), int(opts.Height)), image.YCbCrSubsampleRatio420)
-
 	ret := C.openCamera(C.int(opts.Index), C.int(opts.Width), C.int(opts.Height))
 	if int(ret) != 0 {
 		err = fmt.Errorf("camera: can not open camera %d: error %d", opts.Index, int(ret))
-
 		return
 	}
 
@@ -345,51 +361,44 @@ func New(opts Options) (camera *Camera, err error) {
 
 // Read reads next frame from camera and returns image.
 func (c *Camera) Read() (img image.Image, err error) {
-    // Add a retry mechanism for capture
-    maxRetries := 3
-    var ret C.int
-    
-    for i := 0; i < maxRetries; i++ {
-        ret = C.captureCamera()
-        if int(ret) == 0 && C.image != nil {
-            break
-        }
-        // Short sleep between retries
-        time.Sleep(50 * time.Millisecond)
-    }
-    
-    if int(ret) != 0 {
-        err = fmt.Errorf("camera: can not grab frame after %d retries: error %d", maxRetries, int(ret))
-        return
-    }
+	// Add a retry mechanism for capture
+	maxRetries := 3
+	var ret C.int
 
-    if C.image == nil {
-        err = fmt.Errorf("camera: can not retrieve frame")
-        return
-    }	var yStride C.int
-	var yLen, cbLen, crLen C.int
-	var yPtr, cbPtr, crPtr *C.uint8_t
+	for i := 0; i < maxRetries; i++ {
+		ret = C.captureCamera()
+		if int(ret) == 0 && C.image != nil {
+			break
+		}
+		// Short sleep between retries
+		time.Sleep(50 * time.Millisecond)
+	}
 
-	C.AImage_getPlaneRowStride(C.image, 0, &yStride)
-	C.AImage_getPlaneData(C.image, 0, &yPtr, &yLen)
-	C.AImage_getPlaneData(C.image, 1, &cbPtr, &cbLen)
-	C.AImage_getPlaneData(C.image, 2, &crPtr, &crLen)
-
-	if yLen <= 0 || cbLen <= 0 || crLen <= 0 {
-		err = fmt.Errorf("camera: invalid image data lengths: Y=%d, Cb=%d, Cr=%d", int(yLen), int(cbLen), int(crLen))
+	if int(ret) != 0 {
+		err = fmt.Errorf("camera: can not grab frame after %d retries: error %d", maxRetries, int(ret))
 		return
 	}
 
-	c.img.YStride = int(yStride)
-	c.img.CStride = int(yStride) / 2
+	if C.image == nil {
+		err = fmt.Errorf("camera: can not retrieve frame")
+		return
+	}
 
-	c.img.Y = C.GoBytes(unsafe.Pointer(yPtr), yLen)
-	c.img.Cb = C.GoBytes(unsafe.Pointer(cbPtr), cbLen)
-	c.img.Cr = C.GoBytes(unsafe.Pointer(crPtr), crLen)
+	var dataPtr *C.uint8_t
+	var dataLen C.int
 
-	img = c.img
+	// Get JPEG data directly
+	C.AImage_getPlaneData(C.image, 0, &dataPtr, &dataLen)
+	if int(dataLen) <= 0 {
+		err = fmt.Errorf("camera: invalid image data length: %d", int(dataLen))
+		return
+	}
 
-	// Release the image so the buffer queue doesn't stall
+	// Convert to Go bytes and decode JPEG
+	jpegData := C.GoBytes(unsafe.Pointer(dataPtr), dataLen)
+	img, err = jpeg.Decode(bytes.NewReader(jpegData))
+
+	// Release the image
 	C.AImage_delete(C.image)
 	C.image = nil
 
@@ -398,20 +407,20 @@ func (c *Camera) Read() (img image.Image, err error) {
 
 // Close closes camera.
 func (c *Camera) Close() (err error) {
-    // Stop any ongoing capture first
-    C.pthread_mutex_lock(&C.imageMutex)
-    C.imageReady = 0
-    if C.image != nil {
-        C.AImage_delete(C.image)
-        C.image = nil
-    }
-    C.pthread_mutex_unlock(&C.imageMutex)
+	// Stop any ongoing capture first
+	C.pthread_mutex_lock(&C.imageMutex)
+	C.imageReady = 0
+	if C.image != nil {
+		C.AImage_delete(C.image)
+		C.image = nil
+	}
+	C.pthread_mutex_unlock(&C.imageMutex)
 
-    ret := C.closeCamera()
-    if int(ret) != 0 {
-        err = fmt.Errorf("camera: can not close camera %d: error %d", c.opts.Index, int(ret))
-        return
-    }
+	ret := C.closeCamera()
+	if int(ret) != 0 {
+		err = fmt.Errorf("camera: can not close camera %d: error %d", c.opts.Index, int(ret))
+		return
+	}
 
-    return
+	return
 }
