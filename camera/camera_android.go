@@ -75,37 +75,36 @@ ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks = {
 
 void image_callback(void *context, AImageReader *reader) {
     LOGI("image_callback called");
-
+    
     pthread_mutex_lock(&imageMutex);
 
-    // Delete previous image if exists
+    // Clean up any previous image
     if(image != NULL) {
-        LOGI("Deleting previous image");
         AImage_delete(image);
         image = NULL;
     }
 
-    LOGI("Attempting to acquire new image");
-    media_status_t status = AImageReader_acquireLatestImage(reader, &image);
-    if(status != AMEDIA_OK) {
-        LOGE("failed to acquire next image (reason: %d).\n", status);
-        // Try to acquire latest image once more
-        LOGI("Retrying image acquisition");
-        status = AImageReader_acquireLatestImage(reader, &image);
-        if(status != AMEDIA_OK) {
-            LOGE("failed to acquire next image on retry (reason: %d).\n", status);
-        }
-    }
+    // Get number of images available
+    int32_t numImages = 0;
+    AImageReader_getNumImages(reader, &numImages);
+    LOGI("Number of images available: %d", numImages);
 
-    if(status == AMEDIA_OK && image != NULL) {
-        int32_t width, height;
-        AImage_getWidth(image, &width);
-        AImage_getHeight(image, &height);
-        LOGI("Image acquired successfully: %dx%d", width, height);
-        imageReady = 1;
-        pthread_cond_signal(&imageCond);
+    if(numImages > 0) {
+        // Try to acquire the newest image
+        media_status_t status = AImageReader_acquireNextImage(reader, &image);
+        if(status == AMEDIA_OK && image != NULL) {
+            int32_t format, width, height;
+            AImage_getFormat(image, &format);
+            AImage_getWidth(image, &width);
+            AImage_getHeight(image, &height);
+            LOGI("Acquired image: %dx%d format=%d", width, height, format);
+            imageReady = 1;
+            pthread_cond_signal(&imageCond);
+        } else {
+            LOGE("Failed to acquire image: %d", status);
+        }
     } else {
-        LOGE("Failed to acquire valid image");
+        LOGI("No images available yet");
     }
 
     pthread_mutex_unlock(&imageMutex);
@@ -153,8 +152,9 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use PREVIEW template for continuous streaming
+    // Use PREVIEW template with specific settings
     status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
+    LOGI("Creating capture request with template PREVIEW");
     if(status != ACAMERA_OK) {
 		LOGE("failed to create snapshot capture request (id: %s)\n", selectedCameraId);
 		return status;
@@ -230,15 +230,28 @@ int openCamera(int index, int width, int height) {
     captureCallbacks.onCaptureSequenceAborted = NULL;
     captureCallbacks.onCaptureBufferLost = NULL;
 
-    // Start a repeating request with callbacks
+    // Configure additional capture settings
+    {
+        // Set target FPS range (15-30)
+        int32_t fpsRange[] = {15, 30};
+        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2, fpsRange);
+        
+        // Set auto-exposure antibanding mode
+        uint8_t antibandingMode = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_AUTO;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibandingMode);
+    }
+
+    // Start preview session with synchronous operation
+    ACameraCaptureSession_stopRepeating(cameraCaptureSession);
     status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, &captureCallbacks, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
         LOGE("failed to start repeating request (reason: %d).\n", status);
         return status;
     }
 
-    // Give some time for the session to stabilize
-    usleep(100000); // 100ms delay
+    // Wait longer for session to stabilize
+    LOGI("Waiting for session to stabilize...");
+    usleep(500000); // 500ms delay
 
     ACameraManager_deleteCameraIdList(cameraIdList);
     // Don't delete cameraManager here - it's needed for camera operations
