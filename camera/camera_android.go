@@ -209,19 +209,7 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Create a capture callback
-    ACameraCaptureSession_captureCallbacks captureCallbacks = {
-        .context = NULL,
-        .onCaptureStarted = NULL,
-        .onCaptureProgressed = NULL,
-        .onCaptureCompleted = NULL,
-        .onCaptureFailed = NULL,
-        .onCaptureSequenceCompleted = NULL,
-        .onCaptureSequenceAborted = NULL,
-        .onCaptureBufferLost = NULL,
-    };
-
-        // Create capture callback structure
+    // Create capture callback structure
     ACameraCaptureSession_captureCallbacks captureCallbacks;
     captureCallbacks.context = NULL;
     captureCallbacks.onCaptureStarted = NULL;
