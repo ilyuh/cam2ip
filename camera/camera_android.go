@@ -85,8 +85,15 @@ void image_callback(void *context, AImageReader *reader) {
 
     media_status_t status = AImageReader_acquireLatestImage(reader, &image);
     if(status != AMEDIA_OK) {
-		LOGE("failed to acquire next image (reason: %d).\n", status);
-    } else {
+        LOGE("failed to acquire next image (reason: %d).\n", status);
+        // Try to acquire latest image once more
+        status = AImageReader_acquireLatestImage(reader, &image);
+        if(status != AMEDIA_OK) {
+            LOGE("failed to acquire next image on retry (reason: %d).\n", status);
+        }
+    }
+    
+    if(status == AMEDIA_OK && image != NULL) {
         LOGD("image acquired successfully");
         imageReady = 1;
         pthread_cond_signal(&imageCond);
@@ -150,12 +157,16 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use a larger buffer queue to avoid starvation under load
-    media_status_t mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &imageReader);
+    // Use JPEG format directly and increase buffer size
+    media_status_t mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_JPEG, 8, &imageReader);
     if(mstatus != AMEDIA_OK) {
-		LOGE("failed to create image reader (reason: %d).\n", mstatus);
-		return mstatus;
+        LOGE("failed to create image reader (reason: %d).\n", mstatus);
+        return mstatus;
     }
+    
+    // Set JPEG quality
+    int32_t jpegQuality = 85;
+    ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_JPEG_QUALITY, 1, &jpegQuality);
 
     mstatus = AImageReader_setImageListener(imageReader, &imageListener);
     if(mstatus != AMEDIA_OK) {
@@ -193,12 +204,27 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Start a repeating request so frames continuously arrive to the ImageReader
-    status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
+    // Create a capture callback
+    ACameraCaptureSession_captureCallbacks captureCallbacks = {
+        .context = NULL,
+        .onCaptureStarted = NULL,
+        .onCaptureProgressed = NULL,
+        .onCaptureCompleted = NULL,
+        .onCaptureFailed = NULL,
+        .onCaptureSequenceCompleted = NULL,
+        .onCaptureSequenceAborted = NULL,
+        .onCaptureBufferLost = NULL,
+    };
+
+    // Start a repeating request with callbacks
+    status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, &captureCallbacks, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
         LOGE("failed to start repeating request (reason: %d).\n", status);
         return status;
     }
+
+    // Give some time for the session to stabilize
+    usleep(100000); // 100ms delay
 
     ACameraManager_deleteCameraIdList(cameraIdList);
     // Don't delete cameraManager here - it's needed for camera operations
@@ -214,7 +240,8 @@ int captureCamera() {
 
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 5; // 5 second timeout
+    timeout.tv_sec += 2; // 2 second timeout
+    timeout.tv_nsec += 500000000; // Add 500ms
 
     camera_status_t status = ACAMERA_OK;
     while(!imageReady && status == ACAMERA_OK) {
@@ -318,18 +345,28 @@ func New(opts Options) (camera *Camera, err error) {
 
 // Read reads next frame from camera and returns image.
 func (c *Camera) Read() (img image.Image, err error) {
-	ret := C.captureCamera()
-	if int(ret) != 0 {
-		err = fmt.Errorf("camera: can not grab frame: error %d", int(ret))
-		return
-	}
+    // Add a retry mechanism for capture
+    maxRetries := 3
+    var ret C.int
+    
+    for i := 0; i < maxRetries; i++ {
+        ret = C.captureCamera()
+        if int(ret) == 0 && C.image != nil {
+            break
+        }
+        // Short sleep between retries
+        time.Sleep(50 * time.Millisecond)
+    }
+    
+    if int(ret) != 0 {
+        err = fmt.Errorf("camera: can not grab frame after %d retries: error %d", maxRetries, int(ret))
+        return
+    }
 
-	if C.image == nil {
-		err = fmt.Errorf("camera: can not retrieve frame")
-		return
-	}
-
-	var yStride C.int
+    if C.image == nil {
+        err = fmt.Errorf("camera: can not retrieve frame")
+        return
+    }	var yStride C.int
 	var yLen, cbLen, crLen C.int
 	var yPtr, cbPtr, crPtr *C.uint8_t
 
@@ -361,12 +398,20 @@ func (c *Camera) Read() (img image.Image, err error) {
 
 // Close closes camera.
 func (c *Camera) Close() (err error) {
-	ret := C.closeCamera()
-	if int(ret) != 0 {
-		err = fmt.Errorf("camera: can not close camera %d: error %d", c.opts.Index, int(ret))
+    // Stop any ongoing capture first
+    C.pthread_mutex_lock(&C.imageMutex)
+    C.imageReady = 0
+    if C.image != nil {
+        C.AImage_delete(C.image)
+        C.image = nil
+    }
+    C.pthread_mutex_unlock(&C.imageMutex)
 
-		return
-	}
+    ret := C.closeCamera()
+    if int(ret) != 0 {
+        err = fmt.Errorf("camera: can not close camera %d: error %d", c.opts.Index, int(ret))
+        return
+    }
 
-	return
+    return
 }
