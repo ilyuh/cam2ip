@@ -17,9 +17,18 @@ package camera
 #include <camera/NdkCameraDevice.h>
 #include <camera/NdkCameraManager.h>
 
-// Forward declarations
+// Function prototypes
+static int openCamera(int index, int width, int height);
+static int captureCamera(void);
+static int closeCamera(void);
+
+// Forward declarations of standard C functions
 void* memcpy(void* dest, const void* src, size_t n);
 void free(void* ptr);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define TAG "camera"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -27,24 +36,25 @@ void free(void* ptr);
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-AImage *image;
-AImageReader *imageReader;
+// Global variables
+static AImage *image = NULL;
+static AImageReader *imageReader = NULL;
 
-ANativeWindow *nativeWindow;
+static ANativeWindow *nativeWindow = NULL;
 
-ACameraDevice *cameraDevice;
-ACameraManager *cameraManager;
-ACameraOutputTarget *cameraOutputTarget;
-ACameraCaptureSession *cameraCaptureSession;
+static ACameraDevice *cameraDevice = NULL;
+static ACameraManager *cameraManager = NULL;
+static ACameraOutputTarget *cameraOutputTarget = NULL;
+static ACameraCaptureSession *cameraCaptureSession = NULL;
 
-ACaptureRequest *captureRequest;
-ACaptureSessionOutput *captureSessionOutput;
-ACaptureSessionOutputContainer *captureSessionOutputContainer;
+static ACaptureRequest *captureRequest = NULL;
+static ACaptureSessionOutput *captureSessionOutput = NULL;
+static ACaptureSessionOutputContainer *captureSessionOutputContainer = NULL;
 
 // Synchronization primitives
-pthread_mutex_t imageMutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t imageCond = PTHREAD_COND_INITIALIZER;
-int imageReady = 0;
+static pthread_mutex_t imageMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t imageCond = PTHREAD_COND_INITIALIZER;
+static int imageReady = 0;
 
 void device_on_disconnected(void *context, ACameraDevice *device) {
     LOGI("camera %s is disconnected.\n", ACameraDevice_getId(device));
@@ -125,7 +135,7 @@ int captureCamera(void);
 int closeCamera(void);
 
 // Function implementations
-int openCamera(int index, int width, int height) {
+static int openCamera(int index, int width, int height) {
     ACameraIdList *cameraIdList;
     const char *selectedCameraId;
 
@@ -305,7 +315,7 @@ int openCamera(int index, int width, int height) {
     return ACAMERA_OK;
 }
 
-int captureCamera(void) {
+static int captureCamera(void) {
     // Just wait for the next frame produced by the repeating request
     pthread_mutex_lock(&imageMutex);
     imageReady = 0;
@@ -340,7 +350,7 @@ int captureCamera(void) {
     return status;
 }
 
-int closeCamera(void) {
+static int closeCamera(void) {
     camera_status_t status = ACAMERA_OK;
 
     if(captureRequest != NULL) {
@@ -387,6 +397,10 @@ int closeCamera(void) {
     LOGI("camera closed.\n");
     return ACAMERA_OK;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #cgo android CFLAGS: -D__ANDROID_API__=24
 #cgo android LDFLAGS: -lcamera2ndk -lmediandk -llog -landroid -lpthread
