@@ -150,7 +150,8 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    media_status_t mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 2, &imageReader);
+    // Use a larger buffer queue to avoid starvation under load
+    media_status_t mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &imageReader);
     if(mstatus != AMEDIA_OK) {
 		LOGE("failed to create image reader (reason: %d).\n", mstatus);
 		return mstatus;
@@ -167,6 +168,21 @@ int openCamera(int index, int width, int height) {
 
     ACameraOutputTarget_create(nativeWindow, &cameraOutputTarget);
     ACaptureRequest_addTarget(captureRequest, cameraOutputTarget);
+
+    // Configure basic 3A controls for preview
+    {
+        // AF mode: CONTINUOUS_PICTURE
+        int32_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+
+        // AE mode: ON
+        int32_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+
+        // AWB mode: AUTO
+        int32_t awbMode = ACAMERA_CONTROL_AWB_MODE_AUTO;
+        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AWB_MODE, 1, &awbMode);
+    }
 
     ACaptureSessionOutput_create(nativeWindow, &captureSessionOutput);
 	ACaptureSessionOutputContainer_add(captureSessionOutputContainer, captureSessionOutput);
@@ -198,7 +214,7 @@ int captureCamera() {
 
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 2; // 2 second timeout
+    timeout.tv_sec += 5; // 5 second timeout
 
     camera_status_t status = ACAMERA_OK;
     while(!imageReady && status == ACAMERA_OK) {
@@ -334,9 +350,13 @@ func (c *Camera) Read() (img image.Image, err error) {
 	c.img.Cb = C.GoBytes(unsafe.Pointer(cbPtr), cbLen)
 	c.img.Cr = C.GoBytes(unsafe.Pointer(crPtr), crLen)
 
-	img = c.img
+    img = c.img
 
-	return
+    // Release the image so the buffer queue doesn't stall
+    C.AImage_delete(C.image)
+    C.image = nil
+
+    return
 }
 
 // Close closes camera.
