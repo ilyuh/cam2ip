@@ -191,21 +191,25 @@ int openCamera(int index, int width, int height) {
 
     // Configure capture settings
     {
-        // Set JPEG quality
-        int32_t jpegQuality = 85;
-        ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_JPEG_QUALITY, 1, &jpegQuality);
+        // Set operating mode to high speed
+        uint8_t controlMode = ACAMERA_CONTROL_MODE_AUTO;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_MODE, 1, &controlMode);
 
-        // AF mode: CONTINUOUS_PICTURE
-        uint8_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+        // AF mode: AUTO
+        uint8_t afMode = ACAMERA_CONTROL_AF_MODE_AUTO;
         ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
 
         // AE mode: ON
         uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
         ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
 
-        // AWB mode: AUTO
-        uint8_t awbMode = ACAMERA_CONTROL_AWB_MODE_AUTO;
-        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AWB_MODE, 1, &awbMode);
+        // Set frame duration to minimum
+        int64_t frameDuration = 0;  // Auto
+        ACaptureRequest_setEntry_i64(captureRequest, ACAMERA_SENSOR_FRAME_DURATION, 1, &frameDuration);
+
+        // Set video stabilization mode
+        uint8_t stabMode = ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_ON;
+        ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE, 1, &stabMode);
     }
 
     ACaptureSessionOutput_create(nativeWindow, &captureSessionOutput);
@@ -240,16 +244,36 @@ int openCamera(int index, int width, int height) {
     }
 
     // Start preview session with synchronous operation
-    ACameraCaptureSession_stopRepeating(cameraCaptureSession);
-    status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, &captureCallbacks, 1, &captureRequest, NULL);
+    LOGI("Starting capture session...");
+    
+    // Create output targets
+    ACaptureSessionOutput *sessionOutput;
+    ACaptureSessionOutputContainer *outputs;
+    
+    ACaptureSessionOutputContainer_create(&outputs);
+    ACaptureSessionOutput_create(nativeWindow, &sessionOutput);
+    ACaptureSessionOutputContainer_add(outputs, sessionOutput);
+    
+    // Create session with outputs
+    status = ACameraDevice_createCaptureSession(cameraDevice, outputs, &captureSessionStateCallbacks, &cameraCaptureSession);
     if(status != ACAMERA_OK) {
-        LOGE("failed to start repeating request (reason: %d).\n", status);
+        LOGE("Failed to create capture session: %d\n", status);
         return status;
     }
 
-    // Wait longer for session to stabilize
+    // Wait for session initialization
     LOGI("Waiting for session to stabilize...");
-    usleep(500000); // 500ms delay
+    usleep(200000); // 200ms initial delay
+    
+    // Start repeating capture request
+    status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
+    if(status != ACAMERA_OK) {
+        LOGE("Failed to start repeating request: %d\n", status);
+        return status;
+    }
+    
+    // Additional stabilization delay
+    usleep(300000); // 300ms additional delay
 
     ACameraManager_deleteCameraIdList(cameraIdList);
     // Don't delete cameraManager here - it's needed for camera operations
