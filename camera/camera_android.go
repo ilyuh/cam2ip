@@ -350,13 +350,13 @@ func (c *Camera) Read() (img image.Image, err error) {
 	c.img.Cb = C.GoBytes(unsafe.Pointer(cbPtr), cbLen)
 	c.img.Cr = C.GoBytes(unsafe.Pointer(crPtr), crLen)
 
-    img = c.img
+	img = c.img
 
-    // Release the image so the buffer queue doesn't stall
-    C.AImage_delete(C.image)
-    C.image = nil
+	// Release the image so the buffer queue doesn't stall
+	C.AImage_delete(C.image)
+	C.image = nil
 
-    return
+	return
 }
 
 // Close closes camera.
