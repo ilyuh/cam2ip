@@ -137,7 +137,8 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_STILL_CAPTURE, &captureRequest);
+    // Use PREVIEW template for continuous streaming to ImageReader
+    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
     if(status != ACAMERA_OK) {
 		LOGE("failed to create snapshot capture request (id: %s)\n", selectedCameraId);
 		return status;
@@ -176,6 +177,13 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
+    // Start a repeating request so frames continuously arrive to the ImageReader
+    status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
+    if(status != ACAMERA_OK) {
+        LOGE("failed to start repeating request (reason: %d).\n", status);
+        return status;
+    }
+
     ACameraManager_deleteCameraIdList(cameraIdList);
     // Don't delete cameraManager here - it's needed for camera operations
     // ACameraManager_delete(cameraManager);
@@ -184,23 +192,15 @@ int openCamera(int index, int width, int height) {
 }
 
 int captureCamera() {
+    // Just wait for the next frame produced by the repeating request
     pthread_mutex_lock(&imageMutex);
     imageReady = 0;
-    pthread_mutex_unlock(&imageMutex);
 
-    // Use single capture request instead of repeating
-    camera_status_t status = ACameraCaptureSession_capture(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
-    if(status != ACAMERA_OK) {
-        LOGE("failed to capture image (reason: %d).\n", status);
-        return status;
-    }
-
-    // Wait for image to be ready (with timeout)
-    pthread_mutex_lock(&imageMutex);
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
     timeout.tv_sec += 2; // 2 second timeout
 
+    camera_status_t status = ACAMERA_OK;
     while(!imageReady && status == ACAMERA_OK) {
         int ret = pthread_cond_timedwait(&imageCond, &imageMutex, &timeout);
         if(ret == ETIMEDOUT) {
@@ -211,7 +211,6 @@ int captureCamera() {
     }
 
     pthread_mutex_unlock(&imageMutex);
-
     return status;
 }
 
