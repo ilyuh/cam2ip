@@ -75,7 +75,7 @@ ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks = {
 
 void image_callback(void *context, AImageReader *reader) {
     LOGI("image_callback called");
-    
+
     pthread_mutex_lock(&imageMutex);
 
     // Clean up any previous image
@@ -150,24 +150,31 @@ int openCamera(int index, int width, int height) {
 		return status;
     }
 
-    // Use PREVIEW template with specific settings
-    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
-    LOGI("Creating capture request with template PREVIEW");
+    // Try STILL_CAPTURE first for better compatibility with older Android
+    status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_STILL_CAPTURE, &captureRequest);
+    LOGI("Creating capture request with template STILL_CAPTURE");
     if(status != ACAMERA_OK) {
-		LOGE("failed to create snapshot capture request (id: %s)\n", selectedCameraId);
-		return status;
+        LOGI("STILL_CAPTURE failed, falling back to PREVIEW template");
+        status = ACameraDevice_createCaptureRequest(cameraDevice, TEMPLATE_PREVIEW, &captureRequest);
+        if(status != ACAMERA_OK) {
+            LOGE("Failed to create capture request with both templates\n");
+            return status;
+        }
     }
 
     status = ACaptureSessionOutputContainer_create(&captureSessionOutputContainer);
     if(status != ACAMERA_OK) {
-		LOGE("failed to create session output container (id: %s)\n", selectedCameraId);
-		return status;
+        LOGE("failed to create session output container (id: %s)\n", selectedCameraId);
+        return status;
     }
 
-    // Create image reader with YUV format for better streaming performance
+    // Try JPEG format first for maximum compatibility
     media_status_t mstatus;
-    LOGI("Creating image reader: %dx%d", width, height);
-    mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &imageReader);
+    LOGI("Creating image reader with JPEG format: %dx%d", width, height);
+    mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_JPEG, 2, &imageReader);
+    if(mstatus != AMEDIA_OK) {
+        LOGI("JPEG format failed, falling back to YUV");
+        mstatus = AImageReader_new(width, height, AIMAGE_FORMAT_YUV_420_888, 4, &imageReader);
     if(mstatus != AMEDIA_OK) {
         LOGE("failed to create image reader (reason: %d).\n", mstatus);
         return mstatus;
@@ -237,43 +244,47 @@ int openCamera(int index, int width, int height) {
         // Set target FPS range (15-30)
         int32_t fpsRange[] = {15, 30};
         ACaptureRequest_setEntry_i32(captureRequest, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2, fpsRange);
-        
+
         // Set auto-exposure antibanding mode
         uint8_t antibandingMode = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_AUTO;
         ACaptureRequest_setEntry_u8(captureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibandingMode);
     }
 
     // Start preview session with synchronous operation
-    LOGI("Starting capture session...");
-    
-    // Create output targets
-    ACaptureSessionOutput *sessionOutput;
-    ACaptureSessionOutputContainer *outputs;
-    
-    ACaptureSessionOutputContainer_create(&outputs);
-    ACaptureSessionOutput_create(nativeWindow, &sessionOutput);
-    ACaptureSessionOutputContainer_add(outputs, sessionOutput);
-    
-    // Create session with outputs
-    status = ACameraDevice_createCaptureSession(cameraDevice, outputs, &captureSessionStateCallbacks, &cameraCaptureSession);
+    LOGI("Setting up capture session...");
+
+    // Start with a clean session
+    if (cameraCaptureSession != NULL) {
+        ACameraCaptureSession_stopRepeating(cameraCaptureSession);
+        ACameraCaptureSession_close(cameraCaptureSession);
+        cameraCaptureSession = NULL;
+    }
+
+    // Create session
+    status = ACameraDevice_createCaptureSession(cameraDevice, captureSessionOutputContainer, &captureSessionStateCallbacks, &cameraCaptureSession);
     if(status != ACAMERA_OK) {
         LOGE("Failed to create capture session: %d\n", status);
         return status;
     }
 
-    // Wait for session initialization
-    LOGI("Waiting for session to stabilize...");
-    usleep(200000); // 200ms initial delay
-    
-    // Start repeating capture request
+    // Give the session time to initialize
+    LOGI("Waiting for session setup...");
+    usleep(500000); // 500ms initial delay for older devices
+
+    // Start capture session
     status = ACameraCaptureSession_setRepeatingRequest(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
     if(status != ACAMERA_OK) {
-        LOGE("Failed to start repeating request: %d\n", status);
-        return status;
+        LOGE("Failed to start repeating request, trying single capture: %d\n", status);
+        
+        // Try single capture as fallback
+        status = ACameraCaptureSession_capture(cameraCaptureSession, NULL, 1, &captureRequest, NULL);
+        if(status != ACAMERA_OK) {
+            LOGE("Both capture modes failed: %d\n", status);
+            return status;
+        }
     }
-    
-    // Additional stabilization delay
-    usleep(300000); // 300ms additional delay
+
+    LOGI("Camera session started successfully");
 
     ACameraManager_deleteCameraIdList(cameraIdList);
     // Don't delete cameraManager here - it's needed for camera operations
@@ -287,15 +298,20 @@ int captureCamera() {
     pthread_mutex_lock(&imageMutex);
     imageReady = 0;
 
+    // Set timeout to 2.5 seconds for older/slower devices
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 1; // 1 second timeout
-    
-    // Ensure we don't overflow nanoseconds
-    timeout.tv_nsec += 250000000; // Add 250ms
+    timeout.tv_sec += 2;
+    timeout.tv_nsec += 500000000; // Add 500ms
     if(timeout.tv_nsec >= 1000000000) {
         timeout.tv_sec += 1;
         timeout.tv_nsec -= 1000000000;
+    }
+
+    // Clear any stale image state
+    if(image != NULL) {
+        AImage_delete(image);
+        image = NULL;
     }
 
     camera_status_t status = ACAMERA_OK;
