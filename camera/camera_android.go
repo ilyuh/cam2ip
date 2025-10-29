@@ -84,27 +84,25 @@ void image_callback(void *context, AImageReader *reader) {
         image = NULL;
     }
 
-    // Get number of images available
-    int32_t numImages = 0;
-    AImageReader_getNumImages(reader, &numImages);
-    LOGI("Number of images available: %d", numImages);
-
-    if(numImages > 0) {
-        // Try to acquire the newest image
-        media_status_t status = AImageReader_acquireNextImage(reader, &image);
+    // Try to acquire latest image
+    media_status_t status = AImageReader_acquireLatestImage(reader, &image);
+    if(status == AMEDIA_OK && image != NULL) {
+        int32_t format, width, height;
+        AImage_getFormat(image, &format);
+        AImage_getWidth(image, &width);
+        AImage_getHeight(image, &height);
+        LOGI("Acquired image: %dx%d format=%d", width, height, format);
+        imageReady = 1;
+        pthread_cond_signal(&imageCond);
+    } else {
+        LOGE("Failed to acquire image: %d", status);
+        // Try one more time
+        status = AImageReader_acquireLatestImage(reader, &image);
         if(status == AMEDIA_OK && image != NULL) {
-            int32_t format, width, height;
-            AImage_getFormat(image, &format);
-            AImage_getWidth(image, &width);
-            AImage_getHeight(image, &height);
-            LOGI("Acquired image: %dx%d format=%d", width, height, format);
+            LOGI("Image acquired on retry");
             imageReady = 1;
             pthread_cond_signal(&imageCond);
-        } else {
-            LOGE("Failed to acquire image: %d", status);
         }
-    } else {
-        LOGI("No images available yet");
     }
 
     pthread_mutex_unlock(&imageMutex);
@@ -267,8 +265,14 @@ int captureCamera() {
 
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 2; // 2 second timeout
-    timeout.tv_nsec += 500000000; // Add 500ms
+    timeout.tv_sec += 1; // 1 second timeout
+    
+    // Ensure we don't overflow nanoseconds
+    timeout.tv_nsec += 250000000; // Add 250ms
+    if(timeout.tv_nsec >= 1000000000) {
+        timeout.tv_sec += 1;
+        timeout.tv_nsec -= 1000000000;
+    }
 
     camera_status_t status = ACAMERA_OK;
     while(!imageReady && status == ACAMERA_OK) {
